@@ -1,0 +1,146 @@
+name: Build and Release
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release'
+        required: false
+
+jobs:
+  release:
+    name: build and release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup and Build on FreeBSD
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          release: 14.1
+          prepare: |
+            pkg install -y wget curl git go121 gcc bash jq node zip
+            ln -s /usr/local/bin/go121 /usr/local/bin/go
+          run: |
+            # Determine version
+            if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ github.event.inputs.tag }}" ]; then
+              VERSION=${{ github.event.inputs.tag }}
+            else
+              VERSION=$(curl -sL "https://api.github.com/repos/naiba/nezha/releases/latest" | jq -r .tag_name)
+            fi
+
+            if [ -z "${VERSION}" ]; then
+              echo "Error: VERSION could not be determined" >&2
+              exit 1
+            fi
+
+            echo "VERSION=${VERSION}" >> $GITHUB_ENV
+            echo "Version set to: ${VERSION}"
+
+            # Build the project
+            version_num=${VERSION#v}
+
+            if git ls-remote --tags https://github.com/naiba/nezha | grep -q "refs/tags/${VERSION}"; then
+              git clone -b ${VERSION} https://github.com/naiba/nezha
+            else
+              echo "Error: Tag ${VERSION} not found in naiba/nezha repository" && exit 1
+            fi
+            
+            # Clean old dist directories
+            rm -rf nezha/cmd/dashboard/*-dist
+            
+            # Download and prepare admin-frontend 
+            wget -q https://github.com/nezhahq/admin-frontend/releases/latest/download/dist.zip -O admin-dist.zip
+            unzip -q admin-dist.zip
+            mv dist nezha/cmd/dashboard/admin-dist
+            rm admin-dist.zip
+            
+            # Download and prepare user-frontend
+            wget -q https://github.com/nezhahq/user-frontend/releases/latest/download/dist.zip -O user-dist.zip
+            unzip -q user-dist.zip
+            mv dist nezha/cmd/dashboard/user-dist
+            rm user-dist.zip
+            
+            # Download and prepare nazhua-frontend
+            wget -q https://github.com/hi2shark/nazhua/releases/latest/download/dist.zip -O nazhua-dist.zip
+            unzip -q nazhua-dist.zip
+            mv dist nezha/cmd/dashboard/nazhua-dist
+            rm nazhua-dist.zip
+            
+            # Download GeoIP database
+            rm -rf nezha/pkg/geoip/geoip.db
+            wget -qO nezha/pkg/geoip/geoip.db https://ipinfo.io/data/free/country.mmdb?token=${{ secrets.IPINFO_TOKEN }}
+            
+            echo "====================0 Install Swag for Swagger docs ========================"
+            # Install Swag for Swagger docs
+            go install github.com/swaggo/swag/cmd/swag@latest
+            
+            # Ensure Swag is in PATH
+            export PATH=$PATH:$(go env GOPATH)/bin
+
+            
+            echo "====================0 Install Swag init ========================"
+            # Generate Swagger docs
+            cd nezha
+            $(go env GOPATH)/bin/swag init --pd -d . -g ./cmd/dashboard/main.go -o ./cmd/dashboard/docs --parseGoList=false
+            
+            # Build the project
+            cd cmd/dashboard
+            echo "====================0 go build ========================"
+            go mod tidy
+            go build -ldflags="-s -w --extldflags '-static -fpic' -X github.com/naiba/nezha/service/singleton.Version=${version_num}"
+            echo "====================1 file dashboard ========================"
+            file dashboard
+
+            # Create output directory
+            mkdir -p ../../output
+            mv dashboard ../../output/nezha-dashboard
+
+            # Prepare config.yaml
+            mkdir -p ../../output/data
+            # cp -rf ../../script/config.yaml ../../output/data/config.yaml
+
+            # Compress dist files
+            cd ../../output
+
+            zip -qr nezha-dashboard.zip .
+            mv nezha-dashboard.zip ..
+
+            tar -czf nezha-dashboard.tar.gz *
+
+            mv ../nezha-dashboard.zip .
+            echo "====================3========================"
+            ls -all
+
+            echo "====================4========================"
+            file nezha-dashboard
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: nezha-freebsd
+          path: |
+            nezha/output/*
+
+      - name: Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: ${{ env.VERSION }}
+          artifacts: "nezha/output/*.zip,nezha/output/*.tar.gz"
+          generateReleaseNotes: true
+          makeLatest: legacy
+          omitBody: false
+          omitBodyDuringUpdate: false
+          omitDraftDuringUpdate: false
+          omitName: false
+          omitNameDuringUpdate: false
+          omitPrereleaseDuringUpdate: false
+          removeArtifacts: false
+          replacesArtifacts: true
+          skipIfReleaseExists: false
+          updateOnlyUnreleased: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.PAT_TOKEN }}
