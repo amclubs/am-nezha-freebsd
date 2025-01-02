@@ -19,6 +19,8 @@ jobs:
         run: |
           export LATEST_APP=$(wget -qO- https://api.github.com/repos/naiba/nezha/tags | gawk -F '["v]' '/name/{print "v"$5;exit}')
           git clone -b $LATEST_APP https://github.com/naiba/nezha
+          rm nezha/pkg/geoip/geoip.db
+          wget -O nezha/pkg/geoip/geoip.db https://ipinfo.io/data/free/country.mmdb?token=${{secrets.IPINFO_TOKEN}}
           cd nezha/cmd/dashboard
           bash ../../../build.sh
           
